@@ -9,8 +9,9 @@ export default function App() {
   const [scannerActive, setScannerActive] = useState(false)
   const [scanStatus, setScanStatus] = useState({ message: '', type: '' }) 
   const [isProcessing, setIsProcessing] = useState(false)
+  
+  const [buyerPhone, setBuyerPhone] = useState('')
 
-  // Fetch events on initial load
   useEffect(() => {
     async function fetchEvents() {
       const { data } = await supabase.from('events').select('name')
@@ -19,7 +20,6 @@ export default function App() {
     fetchEvents()
   }, [])
 
-  // Fetch live inventory when an event is selected
   useEffect(() => {
     async function fetchInventory() {
       if (!selectedEvent) return
@@ -32,18 +32,21 @@ export default function App() {
     fetchInventory()
   }, [selectedEvent])
 
+  useEffect(() => {
+    setBuyerPhone('')
+    setScannerActive(false)
+  }, [selectedEvent])
+
   const handleScan = async (scannedData: string) => {
     if (!scannedData || isProcessing) return
     setIsProcessing(true)
     
-    // Find the scanned tag in the current event's inventory pool
     const targetTag = inventory.find(item => item.tag_type === scannedData)
     
     if (targetTag) {
       if (targetTag.stock_count > 0) {
         const newStock = targetTag.stock_count - 1
         
-        // Deduct from Supabase
         const { error } = await supabase
           .from('inventory')
           .update({ stock_count: newStock })
@@ -51,14 +54,20 @@ export default function App() {
 
         if (!error) {
           const displayName = scannedData.split('_').slice(-2).join(' ')
+          const buyerText = buyerPhone ? `to ${buyerPhone}` : 'issued'
+          
           setScanStatus({ 
-            message: `✅ ISSUED: 1 ${displayName} (Remaining: ${newStock})`, 
+            message: `✅ ISSUED: 1 ${displayName} ${buyerText} (Remaining: ${newStock})`, 
             type: 'success' 
           })
-          // Update local state instantly so the UI reflects the new count
+          
           setInventory(inventory.map(item => 
             item.tag_type === scannedData ? { ...item, stock_count: newStock } : item
           ))
+          
+          setBuyerPhone('')
+          setScannerActive(false)
+          
         } else {
           setScanStatus({ message: '❌ DATABASE ERROR', type: 'error' })
         }
@@ -69,7 +78,6 @@ export default function App() {
       setScanStatus({ message: '❌ ERROR: INVALID TAG FOR THIS EVENT', type: 'error' })
     }
 
-    // Cooldown to prevent double-scanning the same code instantly
     setTimeout(() => {
       setIsProcessing(false)
       setScanStatus({ message: '', type: '' })
@@ -99,11 +107,27 @@ export default function App() {
 
       {selectedEvent && (
         <div className="bg-gray-800 p-4 rounded-lg shadow-md border border-gray-700">
+          
+          <div className="mb-6 border-b border-gray-700 pb-6">
+            <label className="block text-sm font-bold text-mmarumoBlue mb-2">Buyer Phone Number (Optional)</label>
+            <input
+              type="tel"
+              placeholder="e.g. 71234567"
+              className="w-full p-3 border border-gray-600 bg-gray-900 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
+              value={buyerPhone}
+              onChange={(e) => setBuyerPhone(e.target.value)}
+            />
+          </div>
+
           <div className="flex justify-between items-center mb-4">
-            <h3 className="text-lg font-bold text-mmarumoBlue">Live Inventory</h3>
+            <h3 className="text-lg font-bold text-gray-300">Live Inventory</h3>
             <button 
               onClick={() => setScannerActive(!scannerActive)}
-              className={`px-4 py-2 rounded text-white font-bold transition-colors ${scannerActive ? 'bg-mmarumoRed hover:bg-red-800' : 'bg-mmarumoBlue hover:bg-blue-800'}`}
+              className={`px-4 py-2 rounded text-white font-bold transition-colors ${
+                scannerActive 
+                  ? 'bg-mmarumoRed hover:bg-red-800' 
+                  : 'bg-mmarumoBlue hover:bg-blue-800'
+              }`}
             >
               {scannerActive ? 'Turn Off Scanner' : 'Activate Scanner'}
             </button>
@@ -138,7 +162,7 @@ export default function App() {
           )}
 
           {scanStatus.message && (
-            <div className={`mt-6 p-4 rounded text-center font-bold text-white text-xl ${
+            <div className={`mt-6 p-4 rounded text-center font-bold text-white text-lg ${
               scanStatus.type === 'success' ? 'bg-mmarumoBlue' : 'bg-mmarumoRed'
             }`}>
               {scanStatus.message}
