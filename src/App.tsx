@@ -9,6 +9,11 @@ export default function App() {
   const [vendors, setVendors] = useState<string[]>([])
   const [selectedVendor, setSelectedVendor] = useState('')
   
+  // Security States
+  const [pinInput, setPinInput] = useState('')
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [loginError, setLoginError] = useState('')
+  
   const [inventory, setInventory] = useState<any[]>([])
   const [scannerActive, setScannerActive] = useState(false)
   const [scanStatus, setScanStatus] = useState({ message: '', type: '' }) 
@@ -16,7 +21,6 @@ export default function App() {
   
   const [buyerPhone, setBuyerPhone] = useState('')
 
-  // 1. Fetch Events on load
   useEffect(() => {
     async function fetchEvents() {
       const { data } = await supabase.from('events').select('name')
@@ -25,7 +29,6 @@ export default function App() {
     fetchEvents()
   }, [])
 
-  // 2. Fetch Unique Vendors when Event changes
   useEffect(() => {
     async function fetchVendors() {
       if (!selectedEvent) {
@@ -38,27 +41,23 @@ export default function App() {
         .eq('event_name', selectedEvent)
       
       if (data) {
-        // Filter out duplicate vendor names from the rows
         const uniqueVendors = Array.from(new Set(data.map(item => item.vendor_name)))
         setVendors(uniqueVendors as string[])
       }
     }
     fetchVendors()
     
-    // Reset downstream states
+    // Reset session states when event changes
     setSelectedVendor('')
+    setIsAuthenticated(false)
+    setPinInput('')
     setInventory([])
-    setBuyerPhone('')
     setScannerActive(false)
   }, [selectedEvent])
 
-  // 3. Fetch specific Vendor Inventory
   useEffect(() => {
     async function fetchInventory() {
-      if (!selectedEvent || !selectedVendor) {
-        setInventory([])
-        return
-      }
+      if (!selectedEvent || !selectedVendor || !isAuthenticated) return
       const { data } = await supabase
         .from('inventory')
         .select('*')
@@ -68,10 +67,40 @@ export default function App() {
       if (data) setInventory(data)
     }
     fetchInventory()
-    
-    setBuyerPhone('')
+  }, [selectedEvent, selectedVendor, isAuthenticated])
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoginError('')
+    setIsProcessing(true)
+
+    const { data, error } = await supabase
+      .from('vendor_auth')
+      .select('pin_code')
+      .eq('vendor_name', selectedVendor)
+      .single()
+
+    setIsProcessing(false)
+
+    if (error || !data) {
+      setLoginError('❌ Account not registered in auth system.')
+      return
+    }
+
+    if (data.pin_code === pinInput) {
+      setIsAuthenticated(true)
+    } else {
+      setLoginError('❌ Incorrect PIN.')
+    }
+  }
+
+  const handleLogout = () => {
+    setIsAuthenticated(false)
+    setPinInput('')
+    setSelectedVendor('')
     setScannerActive(false)
-  }, [selectedEvent, selectedVendor])
+    setInventory([])
+  }
 
   const handleScan = async (scannedData: string) => {
     if (!scannedData || isProcessing) return
@@ -83,7 +112,6 @@ export default function App() {
       if (targetTag.stock_count > 0) {
         const newStock = targetTag.stock_count - 1
         
-        // Specifically target this vendor's allocation in Supabase
         const { error } = await supabase
           .from('inventory')
           .update({ stock_count: newStock })
@@ -125,7 +153,6 @@ export default function App() {
     }, 3000)
   }
 
-  // Calculate global expected cash across all tickets for the selected vendor
   const totalExpectedCash = inventory.reduce((total, item) => {
     const sold = (item.initial_stock || 0) - (item.stock_count || 0)
     return total + (sold * (item.price || 0))
@@ -133,42 +160,90 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-900 p-4 font-sans text-gray-100">
-      <header className="mb-6 border-b-2 border-mmarumoRed pb-4">
-        <h1 className="text-2xl font-bold text-mmarumoRed">M.Marumo Technologies</h1>
-        <h2 className="text-lg text-gray-300">Gate Tag Validator</h2>
+      <header className="mb-6 border-b-2 border-mmarumoRed pb-4 flex justify-between items-end">
+        <div>
+          <h1 className="text-2xl font-bold text-mmarumoRed">M.Marumo Technologies</h1>
+          <h2 className="text-lg text-gray-300">Gate Tag Validator</h2>
+        </div>
+        {isAuthenticated && (
+          <button 
+            onClick={handleLogout}
+            className="text-sm bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-white"
+          >
+            Logout
+          </button>
+        )}
       </header>
 
-      <div className="mb-4">
-        <label className="block text-sm font-medium text-gray-300 mb-2">Select Event</label>
-        <select 
-          className="w-full p-3 border border-gray-700 bg-gray-800 text-white rounded-md focus:outline-none focus:border-mmarumoBlue"
-          value={selectedEvent}
-          onChange={(e) => setSelectedEvent(e.target.value)}
-        >
-          <option value="">-- Choose an Event --</option>
-          {events.map((evt, idx) => (
-            <option key={idx} value={evt.name}>{evt.name}</option>
-          ))}
-        </select>
-      </div>
+      {/* LOGIN GATE */}
+      {!isAuthenticated ? (
+        <div className="bg-gray-800 p-6 rounded-lg shadow-md border border-gray-700 max-w-md mx-auto mt-10">
+          <h3 className="text-xl font-bold text-mmarumoBlue mb-4">Vendor Secure Login</h3>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Event</label>
+              <select 
+                className="w-full p-3 border border-gray-700 bg-gray-900 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
+                value={selectedEvent}
+                onChange={(e) => setSelectedEvent(e.target.value)}
+              >
+                <option value="">-- Choose Event --</option>
+                {events.map((evt, idx) => (
+                  <option key={idx} value={evt.name}>{evt.name}</option>
+                ))}
+              </select>
+            </div>
 
-      {selectedEvent && vendors.length > 0 && (
-        <div className="mb-6">
-          <label className="block text-sm font-medium text-gray-300 mb-2">Select Vendor / Gate</label>
-          <select 
-            className="w-full p-3 border border-gray-700 bg-gray-800 text-white rounded-md focus:outline-none focus:border-mmarumoBlue"
-            value={selectedVendor}
-            onChange={(e) => setSelectedVendor(e.target.value)}
-          >
-            <option value="">-- Choose Vendor --</option>
-            {vendors.map((vendor, idx) => (
-              <option key={idx} value={vendor}>{vendor}</option>
-            ))}
-          </select>
+            {selectedEvent && vendors.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Vendor ID / Name</label>
+                <select 
+                  className="w-full p-3 border border-gray-700 bg-gray-900 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
+                  value={selectedVendor}
+                  onChange={(e) => setSelectedVendor(e.target.value)}
+                >
+                  <option value="">-- Select Identity --</option>
+                  {vendors.map((vendor, idx) => (
+                    <option key={idx} value={vendor}>{vendor}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {selectedVendor && (
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Access PIN</label>
+                <input
+                  type="password"
+                  placeholder="Enter 4-digit PIN"
+                  className="w-full p-3 border border-gray-700 bg-gray-900 text-white rounded-md focus:outline-none focus:border-mmarumoRed text-center tracking-widest text-lg"
+                  value={pinInput}
+                  onChange={(e) => setPinInput(e.target.value)}
+                />
+              </div>
+            )}
+
+            {selectedVendor && (
+              <button 
+                type="submit"
+                disabled={isProcessing}
+                className={`w-full py-3 rounded text-white font-bold transition-colors ${
+                  isProcessing ? 'bg-gray-600' : 'bg-mmarumoBlue hover:bg-blue-800'
+                }`}
+              >
+                {isProcessing ? 'Verifying...' : 'Access Dashboard'}
+              </button>
+            )}
+
+            {loginError && (
+              <div className="mt-4 p-3 bg-mmarumoRed text-white rounded text-center font-bold">
+                {loginError}
+              </div>
+            )}
+          </form>
         </div>
-      )}
-
-      {selectedEvent && selectedVendor && (
+      ) : (
+        /* VENDOR DASHBOARD (Only visible after login) */
         <div className="bg-gray-800 p-4 rounded-lg shadow-md border border-gray-700">
           
           <div className="mb-6 border-b border-gray-700 pb-6">
@@ -184,7 +259,7 @@ export default function App() {
 
           <div className="flex justify-between items-end mb-4">
             <div>
-              <h3 className="text-lg font-bold text-gray-300">Vendor Dashboard</h3>
+              <h3 className="text-lg font-bold text-gray-300">Active: {selectedVendor}</h3>
               <p className="text-sm font-bold text-green-400">Total Cash: P {totalExpectedCash.toFixed(2)}</p>
             </div>
             <button 
