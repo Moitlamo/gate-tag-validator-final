@@ -127,9 +127,12 @@ export default function App() {
           {scannerActive && (
             <div className="mt-4 border-4 border-dashed border-gray-600 rounded-lg overflow-hidden bg-black">
               <Scanner
-                onResult={(text: string) => handleScan(text)}
+                onScan={(result: any) => {
+                  if (result && result.length > 0) {
+                    handleScan(result[0].rawValue)
+                  }
+                }}
                 onError={(err: any) => console.log(err?.message)}
-                options={{ delayBetweenScanAttempts: 1000 }}
               />
             </div>
           )}
