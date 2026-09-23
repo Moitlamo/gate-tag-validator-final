@@ -1,323 +1,216 @@
 import { useState, useEffect } from 'react'
-import { Scanner } from '@yudiel/react-qr-scanner'
 import { supabase } from './supabaseClient'
 
-export default function App() {
+export default function VendorAllocation() {
   const [events, setEvents] = useState<any[]>([])
+  const [vendorList, setVendorList] = useState<string[]>([])
+  
+  // Form State
   const [selectedEvent, setSelectedEvent] = useState('')
+  const [vendorName, setVendorName] = useState('')
+  const [tagType, setTagType] = useState('')
+  const [initialStock, setInitialStock] = useState('')
+  const [price, setPrice] = useState('')
   
-  const [vendors, setVendors] = useState<string[]>([])
-  const [selectedVendor, setSelectedVendor] = useState('')
-  
-  // Security States
-  const [pinInput, setPinInput] = useState('')
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [loginError, setLoginError] = useState('')
-  
-  const [inventory, setInventory] = useState<any[]>([])
-  const [scannerActive, setScannerActive] = useState(false)
-  const [scanStatus, setScanStatus] = useState({ message: '', type: '' }) 
-  const [isProcessing, setIsProcessing] = useState(false)
-  
-  const [buyerPhone, setBuyerPhone] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [status, setStatus] = useState({ message: '', type: '' })
 
+  // Fetch available events and registered vendors on load
   useEffect(() => {
-    async function fetchEvents() {
-      const { data } = await supabase.from('events').select('name')
-      if (data) setEvents(data)
+    async function fetchInitialData() {
+      // Fetch Events
+      const { data: eventData } = await supabase.from('events').select('name')
+      if (eventData) setEvents(eventData)
+
+      // Fetch Vendors (change 'vendor_auth' to 'vendors' if your main list is there)
+      const { data: vendorData } = await supabase.from('vendor_auth').select('vendor_name')
+      if (vendorData) {
+        setVendorList(vendorData.map(v => v.vendor_name))
+      }
     }
-    fetchEvents()
+    fetchInitialData()
   }, [])
 
-  useEffect(() => {
-    async function fetchVendors() {
-      if (!selectedEvent) {
-        setVendors([])
-        return
-      }
-      const { data } = await supabase
-        .from('inventory')
-        .select('vendor_name')
-        .eq('event_name', selectedEvent)
-      
-      if (data) {
-        const uniqueVendors = Array.from(new Set(data.map(item => item.vendor_name)))
-        setVendors(uniqueVendors as string[])
-      }
-    }
-    fetchVendors()
-    
-    // Reset session states when event changes
-    setSelectedVendor('')
-    setIsAuthenticated(false)
-    setPinInput('')
-    setInventory([])
-    setScannerActive(false)
-  }, [selectedEvent])
-
-  useEffect(() => {
-    async function fetchInventory() {
-      if (!selectedEvent || !selectedVendor || !isAuthenticated) return
-      const { data } = await supabase
-        .from('inventory')
-        .select('*')
-        .eq('event_name', selectedEvent)
-        .eq('vendor_name', selectedVendor)
-        
-      if (data) setInventory(data)
-    }
-    fetchInventory()
-  }, [selectedEvent, selectedVendor, isAuthenticated])
-
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleAllocate = async (e: React.FormEvent) => {
     e.preventDefault()
-    setLoginError('')
-    setIsProcessing(true)
-
-    const { data, error } = await supabase
-      .from('vendor_auth')
-      .select('pin_code')
-      .eq('vendor_name', selectedVendor)
-      .single()
-
-    setIsProcessing(false)
-
-    if (error || !data) {
-      setLoginError('❌ Account not registered in auth system.')
+    
+    if (!selectedEvent || !vendorName || !tagType || !initialStock || !price) {
+      setStatus({ message: '⚠️ Please fill in all fields.', type: 'error' })
       return
     }
 
-    if (data.pin_code === pinInput) {
-      setIsAuthenticated(true)
-    } else {
-      setLoginError('❌ Incorrect PIN.')
-    }
-  }
+    setIsSubmitting(true)
+    setStatus({ message: '', type: '' })
 
-  const handleLogout = () => {
-    setIsAuthenticated(false)
-    setPinInput('')
-    setSelectedVendor('')
-    setScannerActive(false)
-    setInventory([])
-  }
+    const stockQty = parseInt(initialStock)
+    const ticketPrice = parseFloat(price)
 
-  const handleScan = async (scannedData: string) => {
-    if (!scannedData || isProcessing) return
-    setIsProcessing(true)
-    
-    const targetTag = inventory.find(item => item.tag_type === scannedData)
-    
-    if (targetTag) {
-      if (targetTag.stock_count > 0) {
-        const newStock = targetTag.stock_count - 1
-        
-        const { error } = await supabase
-          .from('inventory')
-          .update({ stock_count: newStock })
-          .eq('tag_type', scannedData)
-          .eq('event_name', selectedEvent)
-          .eq('vendor_name', selectedVendor)
+    // 1. Check for existing allocation for this vendor, event, and tag
+    const { data: existingRow, error: fetchError } = await supabase
+      .from('inventory')
+      .select('*')
+      .eq('event_name', selectedEvent)
+      .eq('vendor_name', vendorName)
+      .eq('tag_type', tagType)
+      .single()
 
-        if (!error) {
-          const displayName = scannedData.includes('_') 
-            ? scannedData.split('_').slice(-2).join(' ') 
-            : scannedData;
-          const buyerText = buyerPhone ? `to ${buyerPhone}` : 'issued'
-          
-          setScanStatus({ 
-            message: `✅ ISSUED: 1 ${displayName} ${buyerText} (Remaining: ${newStock})`, 
-            type: 'success' 
-          })
-          
-          setInventory(inventory.map(item => 
-            item.tag_type === scannedData ? { ...item, stock_count: newStock } : item
-          ))
-          
-          setBuyerPhone('')
-          setScannerActive(false)
-          
-        } else {
-          setScanStatus({ message: '❌ DATABASE ERROR', type: 'error' })
-        }
+    if (existingRow) {
+      // 2. REFILL LOGIC: Add to existing allocation
+      const newInitial = (existingRow.initial_stock || 0) + stockQty
+      const newStock = (existingRow.stock_count || 0) + stockQty
+
+      const { error: updateError } = await supabase
+        .from('inventory')
+        .update({ 
+          initial_stock: newInitial, 
+          stock_count: newStock, 
+          price: ticketPrice 
+        })
+        .eq('event_name', selectedEvent)
+        .eq('vendor_name', vendorName)
+        .eq('tag_type', tagType)
+
+      setIsSubmitting(false)
+
+      if (!updateError) {
+        setStatus({ 
+          message: `✅ REFILL SUCCESS: Added ${stockQty} to ${vendorName}'s ${tagType} batch. New Total: ${newInitial}`, 
+          type: 'success' 
+        })
+        setInitialStock('')
       } else {
-        setScanStatus({ message: '❌ ERROR: OUT OF STOCK', type: 'error' })
+        setStatus({ message: `❌ Update Error: ${updateError.message}`, type: 'error' })
       }
+
     } else {
-      setScanStatus({ message: '❌ ERROR: INVALID TAG FOR THIS VENDOR', type: 'error' })
+      // 3. NEW ASSIGNMENT LOGIC: Insert a brand new row
+      const { error: insertError } = await supabase
+        .from('inventory')
+        .insert([
+          {
+            event_name: selectedEvent,
+            vendor_name: vendorName,
+            tag_type: tagType,
+            initial_stock: stockQty,
+            stock_count: stockQty,
+            price: ticketPrice
+          }
+        ])
+
+      setIsSubmitting(false)
+
+      if (!insertError) {
+        setStatus({ 
+          message: `✅ NEW ASSIGNMENT: Issued ${stockQty} ${tagType} tags to ${vendorName}.`, 
+          type: 'success' 
+        })
+        setTagType('')
+        setInitialStock('')
+        setPrice('')
+      } else {
+        setStatus({ message: `❌ Insert Error: ${insertError.message}`, type: 'error' })
+      }
     }
-
-    setTimeout(() => {
-      setIsProcessing(false)
-      setScanStatus({ message: '', type: '' })
-    }, 3000)
   }
-
-  const totalExpectedCash = inventory.reduce((total, item) => {
-    const sold = (item.initial_stock || 0) - (item.stock_count || 0)
-    return total + (sold * (item.price || 0))
-  }, 0)
 
   return (
-    <div className="min-h-screen bg-gray-900 p-4 font-sans text-gray-100">
-      <header className="mb-6 border-b-2 border-mmarumoRed pb-4 flex justify-between items-end">
-        <div>
-          <h1 className="text-2xl font-bold text-mmarumoRed">M.Marumo Technologies</h1>
-          <h2 className="text-lg text-gray-300">Gate Tag Validator</h2>
-        </div>
-        {isAuthenticated && (
-          <button 
-            onClick={handleLogout}
-            className="text-sm bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-white"
-          >
-            Logout
-          </button>
-        )}
+    <div className="bg-gray-900 p-6 rounded-lg shadow-md border border-gray-700 font-sans text-gray-100 max-w-lg mx-auto mt-10">
+      <header className="mb-6 border-b-2 border-mmarumoRed pb-4">
+        <h2 className="text-xl font-bold text-mmarumoRed">M.Marumo Technologies</h2>
+        <h3 className="text-md text-gray-300">Issue Vendor Allocation</h3>
       </header>
 
-      {/* LOGIN GATE */}
-      {!isAuthenticated ? (
-        <div className="bg-gray-800 p-6 rounded-lg shadow-md border border-gray-700 max-w-md mx-auto mt-10">
-          <h3 className="text-xl font-bold text-mmarumoBlue mb-4">Vendor Secure Login</h3>
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Event</label>
-              <select 
-                className="w-full p-3 border border-gray-700 bg-gray-900 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
-                value={selectedEvent}
-                onChange={(e) => setSelectedEvent(e.target.value)}
-              >
-                <option value="">-- Choose Event --</option>
-                {events.map((evt, idx) => (
-                  <option key={idx} value={evt.name}>{evt.name}</option>
-                ))}
-              </select>
-            </div>
-
-            {selectedEvent && vendors.length > 0 && (
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Vendor ID / Name</label>
-                <select 
-                  className="w-full p-3 border border-gray-700 bg-gray-900 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
-                  value={selectedVendor}
-                  onChange={(e) => setSelectedVendor(e.target.value)}
-                >
-                  <option value="">-- Select Identity --</option>
-                  {vendors.map((vendor, idx) => (
-                    <option key={idx} value={vendor}>{vendor}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {selectedVendor && (
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Access PIN</label>
-                <input
-                  type="password"
-                  placeholder="Enter 4-digit PIN"
-                  className="w-full p-3 border border-gray-700 bg-gray-900 text-white rounded-md focus:outline-none focus:border-mmarumoRed text-center tracking-widest text-lg"
-                  value={pinInput}
-                  onChange={(e) => setPinInput(e.target.value)}
-                />
-              </div>
-            )}
-
-            {selectedVendor && (
-              <button 
-                type="submit"
-                disabled={isProcessing}
-                className={`w-full py-3 rounded text-white font-bold transition-colors ${
-                  isProcessing ? 'bg-gray-600' : 'bg-mmarumoBlue hover:bg-blue-800'
-                }`}
-              >
-                {isProcessing ? 'Verifying...' : 'Access Dashboard'}
-              </button>
-            )}
-
-            {loginError && (
-              <div className="mt-4 p-3 bg-mmarumoRed text-white rounded text-center font-bold">
-                {loginError}
-              </div>
-            )}
-          </form>
+      <form onSubmit={handleAllocate} className="space-y-4">
+        
+        {/* Event Selection */}
+        <div>
+          <label className="block text-sm font-bold text-mmarumoBlue mb-1">Target Event</label>
+          <select 
+            className="w-full p-3 border border-gray-700 bg-gray-800 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
+            value={selectedEvent}
+            onChange={(e) => setSelectedEvent(e.target.value)}
+          >
+            <option value="">-- Select Event --</option>
+            {events.map((evt, idx) => (
+              <option key={idx} value={evt.name}>{evt.name}</option>
+            ))}
+          </select>
         </div>
-      ) : (
-        /* VENDOR DASHBOARD (Only visible after login) */
-        <div className="bg-gray-800 p-4 rounded-lg shadow-md border border-gray-700">
-          
-          <div className="mb-6 border-b border-gray-700 pb-6">
-            <label className="block text-sm font-bold text-mmarumoBlue mb-2">Buyer Phone Number (Optional)</label>
+
+        {/* Vendor Dropdown */}
+        <div>
+          <label className="block text-sm font-bold text-mmarumoBlue mb-1">Select Vendor</label>
+          <select 
+            className="w-full p-3 border border-gray-700 bg-gray-800 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
+            value={vendorName}
+            onChange={(e) => setVendorName(e.target.value)}
+          >
+            <option value="">-- Choose a Vendor --</option>
+            {vendorList.map((vendor, idx) => (
+              <option key={idx} value={vendor}>{vendor}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* QR Tag Type */}
+        <div>
+          <label className="block text-sm font-bold text-mmarumoBlue mb-1">QR Tag String (Must match static QR)</label>
+          <input
+            type="text"
+            placeholder="e.g. SUMMER_COOLERBOX"
+            className="w-full p-3 border border-gray-600 bg-gray-800 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
+            value={tagType}
+            onChange={(e) => setTagType(e.target.value)}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          {/* Quantity */}
+          <div>
+            <label className="block text-sm font-bold text-mmarumoBlue mb-1">Quantity Given</label>
             <input
-              type="tel"
-              placeholder="e.g. 71234567"
-              className="w-full p-3 border border-gray-600 bg-gray-900 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
-              value={buyerPhone}
-              onChange={(e) => setBuyerPhone(e.target.value)}
+              type="number"
+              min="1"
+              placeholder="e.g. 50"
+              className="w-full p-3 border border-gray-600 bg-gray-800 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
+              value={initialStock}
+              onChange={(e) => setInitialStock(e.target.value)}
             />
           </div>
 
-          <div className="flex justify-between items-end mb-4">
-            <div>
-              <h3 className="text-lg font-bold text-gray-300">Active: {selectedVendor}</h3>
-              <p className="text-sm font-bold text-green-400">Total Cash: P {totalExpectedCash.toFixed(2)}</p>
-            </div>
-            <button 
-              onClick={() => setScannerActive(!scannerActive)}
-              className={`px-4 py-2 rounded text-white font-bold transition-colors ${
-                scannerActive 
-                  ? 'bg-mmarumoRed hover:bg-red-800' 
-                  : 'bg-mmarumoBlue hover:bg-blue-800'
-              }`}
-            >
-              {scannerActive ? 'Turn Off Scanner' : 'Activate Scanner'}
-            </button>
+          {/* Price */}
+          <div>
+            <label className="block text-sm font-bold text-mmarumoBlue mb-1">Price (Pula)</label>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="e.g. 150.00"
+              className="w-full p-3 border border-gray-600 bg-gray-800 text-white rounded-md focus:outline-none focus:border-mmarumoRed"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+            />
           </div>
+        </div>
 
-          <div className="grid grid-cols-1 gap-4 mb-6">
-            {inventory.map((item, idx) => {
-              const displayName = item.tag_type.includes('_') 
-                ? item.tag_type.split('_').slice(-2).join(' ') 
-                : item.tag_type;
-              
-              const ticketsSold = (item.initial_stock || 0) - (item.stock_count || 0)
-              const cashExpected = ticketsSold * (item.price || 0)
-              
-              return (
-                <div key={idx} className="bg-gray-900 p-4 rounded border border-gray-700 flex justify-between items-center">
-                  <div>
-                    <div className="text-sm text-gray-400 uppercase font-bold">{displayName}</div>
-                    <div className="text-xs text-gray-500">Price: P {item.price} | Sold: {ticketsSold}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-2xl font-bold text-mmarumoBlue">{item.stock_count} <span className="text-sm font-normal text-gray-400">left</span></div>
-                    <div className="text-sm font-bold text-green-400">P {cashExpected.toFixed(2)}</div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
+        {/* Submit Button */}
+        <button 
+          type="submit"
+          disabled={isSubmitting}
+          className={`w-full mt-4 px-4 py-3 rounded text-white font-bold transition-colors ${
+            isSubmitting ? 'bg-gray-600' : 'bg-mmarumoBlue hover:bg-blue-800'
+          }`}
+        >
+          {isSubmitting ? 'Saving Allocation...' : 'Issue to Vendor'}
+        </button>
+      </form>
 
-          {scannerActive && (
-            <div className="mt-4 border-4 border-dashed border-gray-600 rounded-lg overflow-hidden bg-black">
-              <Scanner
-                onScan={(result: any) => {
-                  if (result && result.length > 0) {
-                    handleScan(result[0].rawValue)
-                  }
-                }}
-                onError={(err: any) => console.log(err?.message)}
-              />
-            </div>
-          )}
-
-          {scanStatus.message && (
-            <div className={`mt-6 p-4 rounded text-center font-bold text-white text-lg ${
-              scanStatus.type === 'success' ? 'bg-mmarumoBlue' : 'bg-mmarumoRed'
-            }`}>
-              {scanStatus.message}
-            </div>
-          )}
+      {/* Status Notifications */}
+      {status.message && (
+        <div className={`mt-6 p-4 rounded text-center font-bold text-white ${
+          status.type === 'success' ? 'bg-green-700' : 'bg-mmarumoRed'
+        }`}>
+          {status.message}
         </div>
       )}
     </div>
